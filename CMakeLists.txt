@@ -20,3 +20,33 @@ add_executable(arena_test tests/arena_test.cpp)
 target_link_libraries(arena_test PRIVATE frame_arena_core)
 target_include_directories(arena_test PRIVATE tests)
 add_test(NAME arena_test COMMAND arena_test)
+
+include(CheckLanguage)
+check_language(CUDA)
+if(NOT CMAKE_CUDA_COMPILER)
+  message(STATUS "CUDA compiler not found; building CPU-only targets")
+  return()
+endif()
+
+enable_language(CUDA)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+if(NOT CMAKE_CUDA_ARCHITECTURES)
+  set(CMAKE_CUDA_ARCHITECTURES native)
+endif()
+find_package(CUDAToolkit REQUIRED)
+
+add_library(frame_arena src/cuda_error.cpp src/cuda_resource.cpp src/frame_ring.cpp src/grayscale.cu)
+target_link_libraries(frame_arena PUBLIC frame_arena_core CUDA::cudart)
+target_compile_options(frame_arena PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>)
+
+add_executable(frame_pipeline examples/grayscale_pipeline.cu)
+target_link_libraries(frame_pipeline PRIVATE frame_arena)
+
+add_executable(frame_ring_test tests/frame_ring_test.cu)
+target_link_libraries(frame_ring_test PRIVATE frame_arena)
+target_include_directories(frame_ring_test PRIVATE tests)
+add_test(NAME frame_ring_test COMMAND frame_ring_test)
+
+add_executable(allocation_benchmark benchmarks/allocation_benchmark.cu)
+target_link_libraries(allocation_benchmark PRIVATE frame_arena)
