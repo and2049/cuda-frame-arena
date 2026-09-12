@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <vector>
 
@@ -39,11 +40,20 @@ inline std::optional<FrameRegions> carve_frame(Arena& arena, FrameDims dims) noe
   return r;
 }
 
+inline std::uint32_t synthetic_word(std::uint32_t index, std::uint32_t frame_id) noexcept {
+  std::uint32_t word = (index + frame_id * 2654435761u + 1u) * 2246822519u;
+  return word ^ (word >> 15);
+}
+
 inline void fill_synthetic_rgb(std::uint8_t* rgb, FrameDims dims, std::uint32_t frame_id) noexcept {
-  std::uint32_t state = frame_id * 2654435761u + 1u;
-  for (std::size_t i = 0; i < dims.pixels() * 3; ++i) {
-    state = state * 1664525u + 1013904223u;
-    rgb[i] = static_cast<std::uint8_t>(state >> 24);
+  std::size_t bytes = dims.pixels() * 3;
+  std::size_t words = bytes / 4;
+  for (std::size_t i = 0; i < words; ++i) {
+    std::uint32_t word = synthetic_word(static_cast<std::uint32_t>(i), frame_id);
+    std::memcpy(rgb + 4 * i, &word, 4);
+  }
+  for (std::size_t i = 4 * words; i < bytes; ++i) {
+    rgb[i] = static_cast<std::uint8_t>(synthetic_word(static_cast<std::uint32_t>(i), frame_id));
   }
 }
 
