@@ -20,6 +20,16 @@ double ms_between(Clock::time_point a, Clock::time_point b) {
   return std::chrono::duration<double, std::milli>(b - a).count();
 }
 
+bool spot_check(const FrameRegions& host, FrameDims dims) {
+  std::uint32_t total = 0;
+  for (std::size_t bin = 0; bin < kHistogramBins; ++bin) total += host.histogram[bin];
+  if (total != dims.pixels()) return false;
+  for (std::size_t i = 0; i < dims.pixels(); i += 61) {
+    if (host.gray[i] != luma(host.rgb[3 * i], host.rgb[3 * i + 1], host.rgb[3 * i + 2])) return false;
+  }
+  return true;
+}
+
 class Policy {
 public:
   virtual ~Policy() = default;
@@ -150,15 +160,20 @@ public:
     std::vector<Sample> steady(samples_.begin() + warmup_, samples_.end());
     auto last_end = std::max_element(steady.begin(), steady.end(), [](auto& a, auto& b) { return a.end < b.end; })->end;
     double fps = steady.size() / (ms_between(steady.front().begin, last_end) / 1000.0);
-    return {policy_.name(), ring_.depth(), ring_.stats().blocked, fps, std::move(steady)};
+    return {policy_.name(), ring_.depth(), blocked_, fps, std::move(steady)};
   }
 
 private:
   void submit(std::uint32_t id) {
     auto begin = Clock::now();
-    std::optional<FrameLease> lease;
-    while (!(lease = ring_.try_acquire())) poll();
+    std::optional<FrameLease> lease = ring_.try_acquire();
+    if (!lease) ++blocked_;
+    while (!lease) {
+      poll();
+      lease = ring_.try_acquire();
+    }
     Pending& p = pending_[lease->index()];
+    if (p.active) finalize(lease->index());
     auto alloc_start = Clock::now();
     p.host = policy_.host(*lease, dims_);
     p.device = policy_.device(*lease, dims_);
@@ -184,22 +199,26 @@ private:
 
   void poll() {
     for (std::size_t i = 0; i < pending_.size(); ++i) {
-      Pending& p = pending_[i];
-      if (!p.active) continue;
+      if (!pending_[i].active) continue;
       cudaError_t status = ring_.slot(i).completion.query();
       if (status == cudaErrorNotReady) continue;
       check_cuda(status, "cudaEventQuery");
-      p.sample.end = Clock::now();
-      p.sample.latency_ms = ms_between(p.sample.begin, p.sample.end);
-      p.sample.h2d_ms = p.marks[1].elapsed_ms_since(p.marks[0]);
-      p.sample.kernel_ms = p.marks[2].elapsed_ms_since(p.marks[1]);
-      p.sample.d2h_ms = p.marks[3].elapsed_ms_since(p.marks[2]);
-      if (!verify_grayscale(p.host, dims_)) throw std::runtime_error("verification failed");
-      policy_.release(i, p.host, p.device);
-      samples_.push_back(p.sample);
-      p.active = false;
-      --in_flight_;
+      finalize(i);
     }
+  }
+
+  void finalize(std::size_t i) {
+    Pending& p = pending_[i];
+    p.sample.end = Clock::now();
+    p.sample.latency_ms = ms_between(p.sample.begin, p.sample.end);
+    p.sample.h2d_ms = p.marks[1].elapsed_ms_since(p.marks[0]);
+    p.sample.kernel_ms = p.marks[2].elapsed_ms_since(p.marks[1]);
+    p.sample.d2h_ms = p.marks[3].elapsed_ms_since(p.marks[2]);
+    if (!spot_check(p.host, dims_)) throw std::runtime_error("verification failed");
+    policy_.release(i, p.host, p.device);
+    samples_.push_back(p.sample);
+    p.active = false;
+    --in_flight_;
   }
 
   Policy& policy_;
@@ -209,6 +228,7 @@ private:
   std::vector<Pending> pending_;
   std::vector<Sample> samples_;
   std::size_t in_flight_ = 0;
+  std::size_t blocked_ = 0;
 };
 
 double percentile(std::vector<double> values, double p) {
