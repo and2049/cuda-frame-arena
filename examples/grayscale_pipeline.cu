@@ -28,8 +28,8 @@ void process_frame(FrameLease& lease, FrameDims dims, std::uint32_t frame_id, Co
   *host->metadata = {frame_id, dims.width, dims.height};
   enqueue_frame(*host, *device, dims, lease.stream());
 
-  lease.on_retire([host = *host, dims, &counters] {
-    verify_grayscale(host, dims) ? ++counters.verified : ++counters.failed;
+  lease.on_retire([host = *host, dims, frame_id, &counters] {
+    verify_grayscale(host, dims, frame_id) ? ++counters.verified : ++counters.failed;
   });
   lease.submit();
 }

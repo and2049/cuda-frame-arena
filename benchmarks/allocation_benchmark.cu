@@ -20,12 +20,14 @@ double ms_between(Clock::time_point a, Clock::time_point b) {
   return std::chrono::duration<double, std::milli>(b - a).count();
 }
 
-bool spot_check(const FrameRegions& host, FrameDims dims) {
+bool spot_check(const FrameRegions& host, FrameDims dims, std::uint32_t frame_id) {
   std::uint32_t total = 0;
   for (std::size_t bin = 0; bin < kHistogramBins; ++bin) total += host.histogram[bin];
   if (total != dims.pixels()) return false;
   for (std::size_t i = 0; i < dims.pixels(); i += 61) {
-    if (host.gray[i] != luma(host.rgb[3 * i], host.rgb[3 * i + 1], host.rgb[3 * i + 2])) return false;
+    std::uint8_t y = luma(synthetic_rgb_byte(3 * i, frame_id), synthetic_rgb_byte(3 * i + 1, frame_id),
+                          synthetic_rgb_byte(3 * i + 2, frame_id));
+    if (host.gray[i] != y) return false;
   }
   return true;
 }
@@ -136,6 +138,7 @@ struct Sample {
 
 struct Pending {
   bool active = false;
+  std::uint32_t frame_id = 0;
   FrameRegions host, device;
   Sample sample;
   CudaEvent marks[4]{CudaEvent(cudaEventDefault), CudaEvent(cudaEventDefault), CudaEvent(cudaEventDefault), CudaEvent(cudaEventDefault)};
@@ -191,6 +194,7 @@ private:
     p.marks[3].record(s);
     policy_.enqueue_release(*lease, p.device);
     p.sample.begin = begin;
+    p.frame_id = id;
     p.active = true;
     ++in_flight_;
     lease->submit();
@@ -214,7 +218,7 @@ private:
     p.sample.h2d_ms = p.marks[1].elapsed_ms_since(p.marks[0]);
     p.sample.kernel_ms = p.marks[2].elapsed_ms_since(p.marks[1]);
     p.sample.d2h_ms = p.marks[3].elapsed_ms_since(p.marks[2]);
-    if (!spot_check(p.host, dims_)) throw std::runtime_error("verification failed");
+    if (!spot_check(p.host, dims_, p.frame_id)) throw std::runtime_error("verification failed");
     policy_.release(i, p.host, p.device);
     samples_.push_back(p.sample);
     p.active = false;

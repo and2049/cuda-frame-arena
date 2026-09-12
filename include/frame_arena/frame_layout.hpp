@@ -45,6 +45,11 @@ inline std::uint32_t synthetic_word(std::uint32_t index, std::uint32_t frame_id)
   return word ^ (word >> 15);
 }
 
+inline std::uint8_t synthetic_rgb_byte(std::size_t index, std::uint32_t frame_id) noexcept {
+  std::uint32_t word = synthetic_word(static_cast<std::uint32_t>(index / 4), frame_id);
+  return static_cast<std::uint8_t>(word >> (8 * (index % 4)));
+}
+
 inline void fill_synthetic_rgb(std::uint8_t* rgb, FrameDims dims, std::uint32_t frame_id) noexcept {
   std::size_t bytes = dims.pixels() * 3;
   std::size_t words = bytes / 4;
@@ -52,9 +57,7 @@ inline void fill_synthetic_rgb(std::uint8_t* rgb, FrameDims dims, std::uint32_t 
     std::uint32_t word = synthetic_word(static_cast<std::uint32_t>(i), frame_id);
     std::memcpy(rgb + 4 * i, &word, 4);
   }
-  for (std::size_t i = 4 * words; i < bytes; ++i) {
-    rgb[i] = static_cast<std::uint8_t>(synthetic_word(static_cast<std::uint32_t>(i), frame_id));
-  }
+  for (std::size_t i = 4 * words; i < bytes; ++i) rgb[i] = synthetic_rgb_byte(i, frame_id);
 }
 
 inline void enqueue_frame(const FrameRegions& host, const FrameRegions& device, FrameDims dims,
@@ -67,10 +70,14 @@ inline void enqueue_frame(const FrameRegions& host, const FrameRegions& device, 
   CUDA_CHECK(cudaMemcpyAsync(host.histogram, device.histogram, kHistogramBytes, cudaMemcpyDeviceToHost, stream));
 }
 
-inline bool verify_grayscale(const FrameRegions& host, FrameDims dims) noexcept {
+// Recomputes the expected output from the synthetic generator rather than
+// reading host.rgb back: the input region is written by the CPU and read by
+// the copy engine, and nothing in the pipeline should need to read it again.
+inline bool verify_grayscale(const FrameRegions& host, FrameDims dims, std::uint32_t frame_id) noexcept {
   std::vector<std::uint32_t> expected(kHistogramBins, 0);
   for (std::size_t i = 0; i < dims.pixels(); ++i) {
-    std::uint8_t y = luma(host.rgb[3 * i], host.rgb[3 * i + 1], host.rgb[3 * i + 2]);
+    std::uint8_t y = luma(synthetic_rgb_byte(3 * i, frame_id), synthetic_rgb_byte(3 * i + 1, frame_id),
+                          synthetic_rgb_byte(3 * i + 2, frame_id));
     if (host.gray[i] != y) return false;
     ++expected[y];
   }

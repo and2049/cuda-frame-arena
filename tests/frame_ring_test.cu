@@ -132,8 +132,8 @@ void test_wraparound_preserves_correctness() {
     CHECK(host && device);
     fill_synthetic_rgb(host->rgb, dims[frame_id % 4], frame_id);
     enqueue_frame(*host, *device, dims[frame_id % 4], lease.stream());
-    lease.on_retire([host = *host, d = dims[frame_id % 4], &verified, &failed] {
-      verify_grayscale(host, d) ? ++verified : ++failed;
+    lease.on_retire([host = *host, d = dims[frame_id % 4], frame_id, &verified, &failed] {
+      verify_grayscale(host, d, frame_id) ? ++verified : ++failed;
     });
     lease.submit();
   }
