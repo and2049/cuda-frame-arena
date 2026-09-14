@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -99,6 +100,18 @@ public:
 
 class MallocAsyncPolicy : public Policy {
 public:
+  // By default the pool returns memory to the driver at every synchronization,
+  // so a per-frame cudaMallocAsync would pay for a fresh mapping each time the
+  // ring blocks. Keeping everything in the pool is what a real pipeline would do.
+  MallocAsyncPolicy() {
+    int device = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    cudaMemPool_t pool;
+    CUDA_CHECK(cudaDeviceGetDefaultMemPool(&pool, device));
+    std::uint64_t threshold = UINT64_MAX;
+    CUDA_CHECK(cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &threshold));
+  }
+
   const char* name() const override { return "cudaMallocAsync/cudaFreeAsync"; }
   FrameRegions host(FrameLease& lease, FrameDims dims) override {
     return require(carve_frame(lease.upload_arena(), lease.download_arena(), dims));
@@ -193,6 +206,10 @@ private:
     p.device = policy_.device(*lease, dims_);
     p.sample.alloc_ms = ms_between(alloc_start, Clock::now());
     fill_synthetic_rgb(p.host.rgb, dims_, id);
+    // Completion times are only observed when poll() runs, so latency carries
+    // up to one submit iteration of quantization. Polling after the fill, the
+    // longest host step, halves that window.
+    poll();
     cudaStream_t s = lease->stream();
     p.marks[0].record(s);
     CUDA_CHECK(cudaMemcpyAsync(p.device.rgb, p.host.rgb, dims_.pixels() * 3, cudaMemcpyHostToDevice, s));
