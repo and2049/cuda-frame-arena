@@ -20,7 +20,7 @@ struct Counters {
 };
 
 void process_frame(FrameLease& lease, FrameDims dims, std::uint32_t frame_id, Counters& counters) {
-  auto host = carve_frame(lease.host_arena(), dims);
+  auto host = carve_frame(lease.upload_arena(), lease.download_arena(), dims);
   auto device = carve_frame(lease.device_arena(), dims);
   if (!host || !device) throw std::runtime_error("frame does not fit in slot arena");
 
@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
   std::size_t frames = argc > 2 ? std::strtoul(argv[2], nullptr, 10) : 64;
   bool drop_when_busy = argc > 3 && std::strcmp(argv[3], "drop") == 0;
 
-  FrameRing ring(depth, frame_slot_bytes({1920, 1080}));
+  FrameRing ring(depth, frame_slot_layout({1920, 1080}));
   Counters counters;
 
   auto start = std::chrono::steady_clock::now();

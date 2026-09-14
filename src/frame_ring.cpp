@@ -17,6 +17,19 @@ std::size_t padded_slot_bytes(std::size_t slot_bytes) {
   return *padded;
 }
 
+SlotLayout padded_layout(SlotLayout layout) {
+  return {padded_slot_bytes(layout.upload_bytes), padded_slot_bytes(layout.download_bytes),
+          padded_slot_bytes(layout.device_bytes)};
+}
+
+unsigned upload_flags(UploadMemory upload) {
+  return upload == UploadMemory::WriteCombined ? cudaHostAllocWriteCombined : cudaHostAllocDefault;
+}
+
+Arena slot_arena(void* slab, std::size_t index, std::size_t slot_bytes) {
+  return Arena(static_cast<std::byte*>(slab) + index * slot_bytes, slot_bytes);
+}
+
 std::size_t slab_bytes(std::size_t depth, std::size_t slot_bytes) {
   auto total = checked_mul(depth, slot_bytes);
   if (!total || depth == 0) throw std::invalid_argument("invalid ring depth");
@@ -39,7 +52,9 @@ FrameLease& FrameLease::operator=(FrameLease&& other) noexcept {
   return *this;
 }
 
-Arena& FrameLease::host_arena() noexcept { return ring_->slots_[index_].host_arena; }
+Arena& FrameLease::upload_arena() noexcept { return ring_->slots_[index_].upload_arena; }
+
+Arena& FrameLease::download_arena() noexcept { return ring_->slots_[index_].download_arena; }
 
 Arena& FrameLease::device_arena() noexcept { return ring_->slots_[index_].device_arena; }
 
@@ -65,17 +80,17 @@ void FrameLease::release() noexcept {
   }
 }
 
-FrameRing::FrameRing(std::size_t depth, std::size_t slot_bytes)
-    : slot_bytes_(padded_slot_bytes(slot_bytes)),
-      host_slab_(slab_bytes(depth, slot_bytes_)),
-      device_slab_(slab_bytes(depth, slot_bytes_)) {
+FrameRing::FrameRing(std::size_t depth, SlotLayout layout, UploadMemory upload)
+    : layout_(padded_layout(layout)),
+      upload_slab_(slab_bytes(depth, layout_.upload_bytes), upload_flags(upload)),
+      download_slab_(slab_bytes(depth, layout_.download_bytes)),
+      device_slab_(slab_bytes(depth, layout_.device_bytes)) {
   slots_.reserve(depth);
-  auto* host = static_cast<std::byte*>(host_slab_.data());
-  auto* device = static_cast<std::byte*>(device_slab_.data());
   for (std::size_t i = 0; i < depth; ++i) {
     FrameSlot& slot = slots_.emplace_back();
-    slot.host_arena = Arena(host + i * slot_bytes_, slot_bytes_);
-    slot.device_arena = Arena(device + i * slot_bytes_, slot_bytes_);
+    slot.upload_arena = slot_arena(upload_slab_.data(), i, layout_.upload_bytes);
+    slot.download_arena = slot_arena(download_slab_.data(), i, layout_.download_bytes);
+    slot.device_arena = slot_arena(device_slab_.data(), i, layout_.device_bytes);
   }
 }
 
@@ -114,7 +129,8 @@ FrameLease FrameRing::lease(std::size_t index) {
 
 void FrameRing::retire(FrameSlot& slot) {
   if (slot.on_retire) std::exchange(slot.on_retire, nullptr)();
-  slot.host_arena.reset();
+  slot.upload_arena.reset();
+  slot.download_arena.reset();
   slot.device_arena.reset();
   slot.state = SlotState::Available;
 }

@@ -32,20 +32,25 @@ double elapsed_ms(std::chrono::steady_clock::time_point start) {
 }
 
 void test_slots_are_disjoint() {
-  FrameRing ring(4, 1000);
-  CHECK(ring.slot_bytes() == 1024);
+  FrameRing ring(4, SlotLayout{1000, 300, 2000});
+  CHECK(ring.layout().upload_bytes == 1024);
+  CHECK(ring.layout().download_bytes == 512);
+  CHECK(ring.layout().device_bytes == 2048);
   for (std::size_t i = 0; i < ring.depth(); ++i) {
-    CHECK(addr(ring.slot(i).host_arena.base()) % 256 == 0);
+    CHECK(addr(ring.slot(i).upload_arena.base()) % 256 == 0);
+    CHECK(addr(ring.slot(i).download_arena.base()) % 256 == 0);
     CHECK(addr(ring.slot(i).device_arena.base()) % 256 == 0);
+    CHECK(disjoint(ring.slot(i).upload_arena, ring.slot(i).download_arena));
     for (std::size_t j = i + 1; j < ring.depth(); ++j) {
-      CHECK(disjoint(ring.slot(i).host_arena, ring.slot(j).host_arena));
+      CHECK(disjoint(ring.slot(i).upload_arena, ring.slot(j).upload_arena));
+      CHECK(disjoint(ring.slot(i).download_arena, ring.slot(j).download_arena));
       CHECK(disjoint(ring.slot(i).device_arena, ring.slot(j).device_arena));
     }
   }
   FrameLease lease = ring.acquire();
   void* p = lease.device_arena().allocate(512, 256);
   CHECK(p == ring.slot(lease.index()).device_arena.base());
-  CHECK(lease.device_arena().allocate(513, 1) == nullptr);
+  CHECK(lease.device_arena().allocate(1537, 1) == nullptr);
 }
 
 void test_moved_owners_are_empty() {
@@ -90,7 +95,8 @@ void test_busy_slot_is_not_reset() {
   FrameRing ring(2, 4096);
   {
     FrameLease lease = ring.acquire();
-    CHECK(lease.host_arena().allocate(100, 1) != nullptr);
+    CHECK(lease.upload_arena().allocate(100, 1) != nullptr);
+    CHECK(lease.download_arena().allocate(200, 1) != nullptr);
     launch_spin(lease.stream(), 150);
     lease.submit();
   }
@@ -98,13 +104,15 @@ void test_busy_slot_is_not_reset() {
 
   CHECK(!ring.try_acquire().has_value());
   CHECK(ring.slot(0).state == SlotState::InFlight);
-  CHECK(ring.slot(0).host_arena.used() == 100);
+  CHECK(ring.slot(0).upload_arena.used() == 100);
+  CHECK(ring.slot(0).download_arena.used() == 200);
 
   auto start = std::chrono::steady_clock::now();
   FrameLease lease = ring.acquire();
   CHECK(elapsed_ms(start) > 50);
   CHECK(lease.index() == 0);
-  CHECK(lease.host_arena().used() == 0);
+  CHECK(lease.upload_arena().used() == 0);
+  CHECK(lease.download_arena().used() == 0);
   CHECK(ring.stats().blocked == 1);
 }
 
@@ -123,11 +131,11 @@ void test_slots_run_concurrently() {
 
 void test_wraparound_preserves_correctness() {
   constexpr FrameDims dims[] = {{64, 48}, {320, 200}, {17, 33}, {256, 256}};
-  FrameRing ring(3, frame_slot_bytes({320, 256}));
+  FrameRing ring(3, frame_slot_layout({320, 256}));
   std::size_t verified = 0, failed = 0;
   for (std::uint32_t frame_id = 0; frame_id < 12; ++frame_id) {
     FrameLease lease = ring.acquire();
-    auto host = carve_frame(lease.host_arena(), dims[frame_id % 4]);
+    auto host = carve_frame(lease.upload_arena(), lease.download_arena(), dims[frame_id % 4]);
     auto device = carve_frame(lease.device_arena(), dims[frame_id % 4]);
     CHECK(host && device);
     fill_synthetic_rgb(host->rgb, dims[frame_id % 4], frame_id);
@@ -145,8 +153,9 @@ void test_wraparound_preserves_correctness() {
 void test_exhaustion_is_clean() {
   FrameRing ring(1, 1024);
   FrameLease lease = ring.acquire();
-  CHECK(!carve_frame(lease.host_arena(), {640, 480}).has_value());
-  CHECK(lease.host_arena().used() == 0);
+  CHECK(!carve_frame(lease.upload_arena(), lease.download_arena(), {640, 480}).has_value());
+  CHECK(lease.upload_arena().used() == 0);
+  CHECK(lease.download_arena().used() == 0);
   CHECK(lease.device_arena().allocate(2048, 1) == nullptr);
   CHECK(lease.device_arena().used() == 0);
   CHECK(lease.device_arena().allocate(1024, 1) != nullptr);

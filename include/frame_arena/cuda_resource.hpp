@@ -10,7 +10,7 @@ namespace frame_arena {
 class PinnedBuffer {
 public:
   PinnedBuffer() noexcept = default;
-  explicit PinnedBuffer(std::size_t bytes);
+  explicit PinnedBuffer(std::size_t bytes, unsigned flags = cudaHostAllocDefault);
   ~PinnedBuffer() noexcept;
 
   PinnedBuffer(const PinnedBuffer&) = delete;

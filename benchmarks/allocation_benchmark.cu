@@ -55,6 +55,12 @@ std::array<std::size_t, 4> region_sizes(FrameDims dims) {
   return {dims.pixels() * 3, dims.pixels(), kHistogramBytes, sizeof(FrameMetadata)};
 }
 
+// Region 0 (rgb) is upload-only, so the separate-allocation policies give it
+// the same write-combined memory the ring's upload slab uses.
+unsigned host_flags(std::size_t region) {
+  return region == 0 ? cudaHostAllocWriteCombined : cudaHostAllocDefault;
+}
+
 FrameRegions regions_from(const std::array<void*, 4>& p) {
   return {static_cast<std::uint8_t*>(p[0]), static_cast<std::uint8_t*>(p[1]),
           static_cast<std::uint32_t*>(p[2]), static_cast<FrameMetadata*>(p[3])};
@@ -63,7 +69,9 @@ FrameRegions regions_from(const std::array<void*, 4>& p) {
 class ArenaPolicy : public Policy {
 public:
   const char* name() const override { return "preallocated arena"; }
-  FrameRegions host(FrameLease& lease, FrameDims dims) override { return require(carve_frame(lease.host_arena(), dims)); }
+  FrameRegions host(FrameLease& lease, FrameDims dims) override {
+    return require(carve_frame(lease.upload_arena(), lease.download_arena(), dims));
+  }
   FrameRegions device(FrameLease& lease, FrameDims dims) override { return require(carve_frame(lease.device_arena(), dims)); }
 };
 
@@ -73,7 +81,7 @@ public:
 
   FrameRegions host(FrameLease&, FrameDims dims) override {
     std::array<void*, 4> p;
-    for (std::size_t i = 0; i < 4; ++i) CUDA_CHECK(cudaHostAlloc(&p[i], region_sizes(dims)[i], cudaHostAllocDefault));
+    for (std::size_t i = 0; i < 4; ++i) CUDA_CHECK(cudaHostAlloc(&p[i], region_sizes(dims)[i], host_flags(i)));
     return regions_from(p);
   }
 
@@ -92,7 +100,9 @@ public:
 class MallocAsyncPolicy : public Policy {
 public:
   const char* name() const override { return "cudaMallocAsync/cudaFreeAsync"; }
-  FrameRegions host(FrameLease& lease, FrameDims dims) override { return require(carve_frame(lease.host_arena(), dims)); }
+  FrameRegions host(FrameLease& lease, FrameDims dims) override {
+    return require(carve_frame(lease.upload_arena(), lease.download_arena(), dims));
+  }
 
   FrameRegions device(FrameLease& lease, FrameDims dims) override {
     std::array<void*, 4> p;
@@ -109,8 +119,8 @@ class ReusedBuffersPolicy : public Policy {
 public:
   ReusedBuffersPolicy(std::size_t depth, FrameDims max_dims) {
     for (std::size_t i = 0; i < depth; ++i) {
-      host_.push_back(make_regions(pinned_, max_dims));
-      device_.push_back(make_regions(devices_, max_dims));
+      host_.push_back(make_regions(pinned_, max_dims, [](std::size_t i, std::size_t bytes) { return PinnedBuffer(bytes, host_flags(i)); }));
+      device_.push_back(make_regions(devices_, max_dims, [](std::size_t, std::size_t bytes) { return DeviceBuffer(bytes); }));
     }
   }
 
@@ -119,10 +129,10 @@ public:
   FrameRegions device(FrameLease& lease, FrameDims) override { return device_[lease.index()]; }
 
 private:
-  template <class Buffer>
-  static FrameRegions make_regions(std::vector<Buffer>& owners, FrameDims dims) {
+  template <class Buffer, class Make>
+  static FrameRegions make_regions(std::vector<Buffer>& owners, FrameDims dims, Make make) {
     std::array<void*, 4> p;
-    for (std::size_t i = 0; i < 4; ++i) p[i] = owners.emplace_back(region_sizes(dims)[i]).data();
+    for (std::size_t i = 0; i < 4; ++i) p[i] = owners.emplace_back(make(i, region_sizes(dims)[i])).data();
     return regions_from(p);
   }
 
@@ -153,9 +163,10 @@ struct Result {
 
 class Runner {
 public:
-  Runner(Policy& policy, std::size_t depth, FrameDims dims, std::size_t frames, std::size_t warmup)
-      : policy_(policy), dims_(dims), frames_(frames), warmup_(warmup),
-        ring_(depth, frame_slot_bytes(dims)), pending_(depth) {}
+  Runner(Policy& policy, std::size_t depth, FrameDims dims, std::size_t frames, std::size_t warmup,
+         UploadMemory upload = UploadMemory::WriteCombined, const char* label = nullptr)
+      : policy_(policy), label_(label ? label : policy.name()), dims_(dims), frames_(frames), warmup_(warmup),
+        ring_(depth, frame_slot_layout(dims), upload), pending_(depth) {}
 
   Result run() {
     for (std::uint32_t id = 0; id < frames_; ++id) submit(id);
@@ -163,7 +174,7 @@ public:
     std::vector<Sample> steady(samples_.begin() + warmup_, samples_.end());
     auto last_end = std::max_element(steady.begin(), steady.end(), [](auto& a, auto& b) { return a.end < b.end; })->end;
     double fps = steady.size() / (ms_between(steady.front().begin, last_end) / 1000.0);
-    return {policy_.name(), ring_.depth(), blocked_, fps, std::move(steady)};
+    return {label_, ring_.depth(), blocked_, fps, std::move(steady)};
   }
 
 private:
@@ -226,6 +237,7 @@ private:
   }
 
   Policy& policy_;
+  std::string label_;
   FrameDims dims_;
   std::size_t frames_, warmup_;
   FrameRing ring_;
@@ -279,6 +291,13 @@ int main(int argc, char** argv) {
   for (std::size_t depth : depths) {
     ArenaPolicy policy;
     print(Runner(policy, depth, dims, frames, warmup).run());
+  }
+
+  std::printf("\n== upload memory at depth 3 (preallocated arena) ==\n");
+  {
+    ArenaPolicy policy;
+    print(Runner(policy, 3, dims, frames, warmup, UploadMemory::Cacheable, "cacheable upload slab").run());
+    print(Runner(policy, 3, dims, frames, warmup, UploadMemory::WriteCombined, "write-combined upload slab").run());
   }
 
   std::printf("\n== allocation strategies at depth 3 ==\n");

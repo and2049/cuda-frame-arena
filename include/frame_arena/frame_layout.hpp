@@ -2,6 +2,7 @@
 
 #include "frame_arena/arena.hpp"
 #include "frame_arena/cuda_error.hpp"
+#include "frame_arena/frame_ring.hpp"
 #include "frame_arena/grayscale.hpp"
 
 #include <cstddef>
@@ -27,17 +28,41 @@ struct FrameRegions {
 
 constexpr std::size_t kHistogramBytes = kHistogramBins * sizeof(std::uint32_t);
 
-constexpr std::size_t frame_slot_bytes(FrameDims dims) noexcept {
-  return dims.pixels() * 4 + kHistogramBytes + 256 + 128 + 256 + alignof(FrameMetadata) + sizeof(FrameMetadata);
+// Per-region alignments, chosen to vary on purpose so padding shows up in used().
+constexpr std::size_t kRgbAlignment = 256;
+constexpr std::size_t kGrayAlignment = 128;
+constexpr std::size_t kHistogramAlignment = 256;
+
+constexpr std::size_t frame_upload_bytes(FrameDims dims) noexcept {
+  return dims.pixels() * 3 + kRgbAlignment;
+}
+
+constexpr std::size_t frame_download_bytes(FrameDims dims) noexcept {
+  return dims.pixels() + kGrayAlignment + kHistogramBytes + kHistogramAlignment + alignof(FrameMetadata) +
+         sizeof(FrameMetadata);
+}
+
+// The device arena holds both directions: the kernel reads rgb and writes gray
+// and histogram from the same slab.
+constexpr SlotLayout frame_slot_layout(FrameDims dims) noexcept {
+  return {frame_upload_bytes(dims), frame_download_bytes(dims), frame_upload_bytes(dims) + frame_download_bytes(dims)};
+}
+
+// rgb comes from `input`, which the CPU fills and the copy engine reads; gray,
+// histogram and metadata come from `output`, which the CPU reads back. On the
+// host these are the upload and download arenas; on the device both are the
+// slot's single device arena.
+inline std::optional<FrameRegions> carve_frame(Arena& input, Arena& output, FrameDims dims) noexcept {
+  FrameRegions r;
+  if (!(r.rgb = static_cast<std::uint8_t*>(input.allocate(dims.pixels() * 3, kRgbAlignment)))) return std::nullopt;
+  if (!(r.gray = static_cast<std::uint8_t*>(output.allocate(dims.pixels(), kGrayAlignment)))) return std::nullopt;
+  if (!(r.histogram = static_cast<std::uint32_t*>(output.allocate(kHistogramBytes, kHistogramAlignment)))) return std::nullopt;
+  if (!(r.metadata = output.allocate<FrameMetadata>())) return std::nullopt;
+  return r;
 }
 
 inline std::optional<FrameRegions> carve_frame(Arena& arena, FrameDims dims) noexcept {
-  FrameRegions r;
-  if (!(r.rgb = static_cast<std::uint8_t*>(arena.allocate(dims.pixels() * 3, 256)))) return std::nullopt;
-  if (!(r.gray = static_cast<std::uint8_t*>(arena.allocate(dims.pixels(), 128)))) return std::nullopt;
-  if (!(r.histogram = static_cast<std::uint32_t*>(arena.allocate(kHistogramBytes, 256)))) return std::nullopt;
-  if (!(r.metadata = arena.allocate<FrameMetadata>())) return std::nullopt;
-  return r;
+  return carve_frame(arena, arena, dims);
 }
 
 inline std::uint32_t synthetic_word(std::uint32_t index, std::uint32_t frame_id) noexcept {
@@ -73,11 +98,12 @@ inline void enqueue_frame(const FrameRegions& host, const FrameRegions& device, 
 // Recomputes the expected output from the synthetic generator rather than
 // reading host.rgb back: the input region is written by the CPU and read by
 // the copy engine, and nothing in the pipeline should need to read it again.
-inline bool verify_grayscale(const FrameRegions& host, FrameDims dims, std::uint32_t frame_id) noexcept {
+inline bool verify_grayscale(const FrameRegions& host, FrameDims dims, std::uint32_t frame_id) {
+  std::vector<std::uint8_t> rgb(dims.pixels() * 3);
+  fill_synthetic_rgb(rgb.data(), dims, frame_id);
   std::vector<std::uint32_t> expected(kHistogramBins, 0);
   for (std::size_t i = 0; i < dims.pixels(); ++i) {
-    std::uint8_t y = luma(synthetic_rgb_byte(3 * i, frame_id), synthetic_rgb_byte(3 * i + 1, frame_id),
-                          synthetic_rgb_byte(3 * i + 2, frame_id));
+    std::uint8_t y = luma(rgb[3 * i], rgb[3 * i + 1], rgb[3 * i + 2]);
     if (host.gray[i] != y) return false;
     ++expected[y];
   }

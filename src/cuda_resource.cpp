@@ -16,8 +16,8 @@ void warn_on_failure(cudaError_t code, const char* operation) noexcept {
 
 }
 
-PinnedBuffer::PinnedBuffer(std::size_t bytes) : size_(bytes) {
-  CUDA_CHECK(cudaHostAlloc(&data_, bytes, cudaHostAllocDefault));
+PinnedBuffer::PinnedBuffer(std::size_t bytes, unsigned flags) : size_(bytes) {
+  CUDA_CHECK(cudaHostAlloc(&data_, bytes, flags));
 }
 
 PinnedBuffer::~PinnedBuffer() noexcept { release(); }
