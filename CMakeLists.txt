@@ -21,6 +21,16 @@ target_link_libraries(arena_test PRIVATE frame_arena_core)
 target_include_directories(arena_test PRIVATE tests)
 add_test(NAME arena_test COMMAND arena_test)
 
+# The gpu dialect version of the pipeline is checked only when an MLIR build is
+# available: point MLIR_OPT (or PATH) at mlir-opt from a build with the mlir
+# project and the NVPTX target.
+find_program(MLIR_OPT mlir-opt)
+if(MLIR_OPT)
+  add_test(NAME gpu_dialect_pipeline
+           COMMAND ${CMAKE_COMMAND} -E env LLVM_BIN=$<PATH:GET_PARENT_PATH,${MLIR_OPT}>
+                   ${CMAKE_SOURCE_DIR}/tools/run_gpu_dialect.sh ${CMAKE_BINARY_DIR}/gpu_dialect)
+endif()
+
 include(CheckLanguage)
 check_language(CUDA)
 if(NOT CMAKE_CUDA_COMPILER)
@@ -50,3 +60,4 @@ add_test(NAME frame_ring_test COMMAND frame_ring_test)
 
 add_executable(allocation_benchmark benchmarks/allocation_benchmark.cu)
 target_link_libraries(allocation_benchmark PRIVATE frame_arena)
+
