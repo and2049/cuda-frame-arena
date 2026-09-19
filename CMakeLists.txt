@@ -21,8 +21,7 @@ target_link_libraries(arena_test PRIVATE frame_arena_core)
 target_include_directories(arena_test PRIVATE tests)
 add_test(NAME arena_test COMMAND arena_test)
 
-# The gpu dialect version of the pipeline is checked only when an MLIR build is
-# available: point MLIR_OPT (or PATH) at mlir-opt from a build with the mlir
+# Checked only when mlir-opt (MLIR_OPT or PATH) comes from a build with the mlir
 # project and the NVPTX target.
 find_program(MLIR_OPT mlir-opt)
 if(MLIR_OPT)
@@ -45,9 +44,10 @@ if(NOT CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES native)
 endif()
 find_package(CUDAToolkit REQUIRED)
+find_package(Threads REQUIRED)
 
 add_library(frame_arena src/cuda_error.cpp src/cuda_resource.cpp src/frame_ring.cpp src/grayscale.cu)
-target_link_libraries(frame_arena PUBLIC frame_arena_core CUDA::cudart)
+target_link_libraries(frame_arena PUBLIC frame_arena_core CUDA::cudart Threads::Threads)
 target_compile_options(frame_arena PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>)
 
 add_executable(frame_pipeline examples/grayscale_pipeline.cu)

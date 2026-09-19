@@ -1,16 +1,6 @@
 #!/bin/bash
-# Emit the device-side LLVM IR, PTX and SASS for src/grayscale.cu.
-#
-#   tools/emit_device_ir.sh [out_dir] [git_rev]
-#
-# Needs an LLVM build with the NVPTX target (clang, llc, opt on PATH or in
-# $LLVM_BIN) and the CUDA toolkit for headers and ptxas ($CUDA_PATH). With a
-# git revision the sources are taken from that commit, so two runs give a
-# before/after pair, for example:
-#
-#   tools/emit_device_ir.sh build/ir/before 637c67d
-#   tools/emit_device_ir.sh build/ir/after
-#   diff build/ir/{before,after}/grayscale.O2.ll
+# Emit the device-side LLVM IR, PTX and SASS of src/grayscale.cu, optionally from a
+# git revision so two runs can be diffed: tools/emit_device_ir.sh [out_dir] [git_rev]
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)

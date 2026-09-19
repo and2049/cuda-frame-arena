@@ -9,9 +9,8 @@ namespace frame_arena {
 
 namespace {
 
-// Blocks per SM for the grid-stride loop. The kernel is bound by its shared
-// histogram flush (256 global atomics per block), so the grid is sized by the
-// device, not by the pixel count: fewer blocks means fewer flushes.
+// The kernel is bound by its per-block histogram flush (256 global atomics), so the
+// grid is sized by the device rather than by the pixel count.
 constexpr unsigned kBlocksPerSm = 4;
 constexpr unsigned kBlockThreads = 256;
 
@@ -28,8 +27,7 @@ __global__ void grayscale_kernel(const std::uint8_t* __restrict__ rgb, std::uint
   const unsigned tid = blockIdx.x * blockDim.x + threadIdx.x;
   const unsigned stride = gridDim.x * blockDim.x;
 
-  // Four pixels are 12 input bytes and 4 output bytes: three 32-bit loads and
-  // one 32-bit store per thread instead of twelve byte loads and four byte stores.
+  // Four pixels per iteration: three 32-bit loads and one store instead of sixteen byte accesses.
   const std::uint32_t quads = pixels / 4;
   const auto* rgb_words = reinterpret_cast<const std::uint32_t*>(rgb);
   auto* gray_words = reinterpret_cast<std::uint32_t*>(gray);

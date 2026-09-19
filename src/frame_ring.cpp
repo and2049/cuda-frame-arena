@@ -95,36 +95,76 @@ FrameRing::FrameRing(std::size_t depth, SlotLayout layout, UploadMemory upload)
 }
 
 std::optional<FrameLease> FrameRing::try_acquire() {
-  FrameSlot& slot = slots_[next_];
-  if (slot.state == SlotState::HostWriting) throw std::logic_error("next slot is still leased");
-  cudaError_t status = slot.completion.query();
-  if (status == cudaErrorNotReady) return std::nullopt;
-  check_cuda(status, "cudaEventQuery");
-  return lease(next_);
+  std::unique_lock lock(mutex_);
+  if (!next_slot_ready()) return std::nullopt;
+  return lease(lock);
 }
 
 FrameLease FrameRing::acquire() {
-  if (auto ready = try_acquire()) return std::move(*ready);
+  std::unique_lock lock(mutex_);
+  if (next_slot_ready()) return lease(lock);
   ++stats_.blocked;
-  slots_[next_].completion.synchronize();
-  return lease(next_);
+  do {
+    wait_for_next_slot(lock);
+  } while (!next_slot_ready());
+  return lease(lock);
 }
 
 void FrameRing::drain() {
+  std::lock_guard lock(mutex_);
   for (FrameSlot& slot : slots_) {
     if (slot.state != SlotState::InFlight) continue;
     slot.completion.synchronize();
     retire(slot);
+    slot.state = SlotState::Available;
   }
 }
 
-FrameLease FrameRing::lease(std::size_t index) {
+std::size_t FrameRing::next_index() const {
+  std::lock_guard lock(mutex_);
+  return next_;
+}
+
+RingStats FrameRing::stats() const {
+  std::lock_guard lock(mutex_);
+  return stats_;
+}
+
+// Called with mutex_ held.
+bool FrameRing::next_slot_ready() {
+  FrameSlot& slot = slots_[next_];
+  if (slot.state == SlotState::HostWriting) return false;
+  cudaError_t status = slot.completion.query();
+  if (status == cudaErrorNotReady) return false;
+  check_cuda(status, "cudaEventQuery");
+  return true;
+}
+
+// The event wait drops the lock because the submit that records the event needs it.
+// Either wait may lose the slot to another thread, so the caller checks again.
+void FrameRing::wait_for_next_slot(std::unique_lock<std::mutex>& lock) {
+  FrameSlot& slot = slots_[next_];
+  if (slot.state == SlotState::HostWriting) {
+    submitted_.wait(lock);
+    return;
+  }
+  lock.unlock();
+  slot.completion.synchronize();
+  lock.lock();
+}
+
+// Claims the slot under the lock and retires it after, since on_retire is caller code
+// and may be slow. If it throws, the lease's destructor submits the slot.
+FrameLease FrameRing::lease(std::unique_lock<std::mutex>& lock) {
+  std::size_t index = next_;
   FrameSlot& slot = slots_[index];
-  retire(slot);
   slot.state = SlotState::HostWriting;
   next_ = (index + 1) % slots_.size();
   ++stats_.acquired;
-  return FrameLease(*this, index);
+  lock.unlock();
+  FrameLease claimed(*this, index);
+  retire(slot);
+  return claimed;
 }
 
 void FrameRing::retire(FrameSlot& slot) {
@@ -132,13 +172,14 @@ void FrameRing::retire(FrameSlot& slot) {
   slot.upload_arena.reset();
   slot.download_arena.reset();
   slot.device_arena.reset();
-  slot.state = SlotState::Available;
 }
 
 void FrameRing::submit(std::size_t index) {
+  std::lock_guard lock(mutex_);
   FrameSlot& slot = slots_[index];
   slot.completion.record(slot.stream.get());
   slot.state = SlotState::InFlight;
+  submitted_.notify_all();
 }
 
 }

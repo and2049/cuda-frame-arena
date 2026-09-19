@@ -100,9 +100,8 @@ public:
 
 class MallocAsyncPolicy : public Policy {
 public:
-  // By default the pool returns memory to the driver at every synchronization,
-  // so a per-frame cudaMallocAsync would pay for a fresh mapping each time the
-  // ring blocks. Keeping everything in the pool is what a real pipeline would do.
+  // By default the pool returns memory to the driver at every synchronization, so a
+  // per-frame cudaMallocAsync would remap each time the ring blocks.
   MallocAsyncPolicy() {
     int device = 0;
     CUDA_CHECK(cudaGetDevice(&device));
@@ -206,9 +205,8 @@ private:
     p.device = policy_.device(*lease, dims_);
     p.sample.alloc_ms = ms_between(alloc_start, Clock::now());
     fill_synthetic_rgb(p.host.rgb, dims_, id);
-    // Completion times are only observed when poll() runs, so latency carries
-    // up to one submit iteration of quantization. Polling after the fill, the
-    // longest host step, halves that window.
+    // Completions are only observed in poll(), so latency is quantized by one submit
+    // iteration; polling after the fill, the longest host step, halves that.
     poll();
     cudaStream_t s = lease->stream();
     p.marks[0].record(s);

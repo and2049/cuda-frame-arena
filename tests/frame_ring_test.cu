@@ -4,9 +4,12 @@
 #include "check.hpp"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
-#include <stdexcept>
+#include <deque>
+#include <mutex>
 #include <string>
+#include <thread>
 
 using namespace frame_arena;
 
@@ -168,16 +171,48 @@ void test_unsubmitted_lease_is_submitted_on_drop() {
   CHECK(ring.try_acquire().has_value());
 }
 
-void test_double_lease_is_rejected() {
+// At depth 2 the producer blocks in acquire() on an event that only this thread's
+// submit records, so the test deadlocks if the ring waits with its lock held.
+void test_leases_move_between_threads() {
+  constexpr int kFrames = 32;
+  FrameRing ring(2, 1024);
+  std::mutex mutex;
+  std::condition_variable handed_over;
+  std::deque<FrameLease> pending;
+  std::size_t retired = 0;
+
+  std::thread producer([&] {
+    for (int i = 0; i < kFrames; ++i) {
+      FrameLease lease = ring.acquire();
+      launch_spin(lease.stream(), 2);
+      lease.on_retire([&retired] { ++retired; });
+      std::lock_guard lock(mutex);
+      pending.push_back(std::move(lease));
+      handed_over.notify_one();
+    }
+  });
+  for (int i = 0; i < kFrames; ++i) {
+    std::unique_lock lock(mutex);
+    handed_over.wait(lock, [&] { return !pending.empty(); });
+    FrameLease lease = std::move(pending.front());
+    pending.pop_front();
+    lock.unlock();
+    launch_spin(lease.stream(), 2);
+    lease.submit();
+  }
+  producer.join();
+  ring.drain();
+  CHECK(ring.stats().acquired == kFrames);
+  CHECK(ring.stats().blocked > 0);
+  CHECK(retired == kFrames);
+}
+
+void test_leased_slot_is_not_ready() {
   FrameRing ring(1, 1024);
   FrameLease lease = ring.acquire();
-  bool thrown = false;
-  try {
-    (void)ring.try_acquire();
-  } catch (const std::logic_error&) {
-    thrown = true;
-  }
-  CHECK(thrown);
+  CHECK(!ring.try_acquire().has_value());
+  lease.submit();
+  CHECK(ring.try_acquire().has_value());
 }
 
 }
@@ -191,6 +226,7 @@ int main() {
   test_wraparound_preserves_correctness();
   test_exhaustion_is_clean();
   test_unsubmitted_lease_is_submitted_on_drop();
-  test_double_lease_is_rejected();
+  test_leases_move_between_threads();
+  test_leased_slot_is_not_ready();
   return test::finish("frame_ring_test");
 }

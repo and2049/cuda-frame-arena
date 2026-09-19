@@ -3,8 +3,10 @@
 #include "frame_arena/arena.hpp"
 #include "frame_arena/cuda_resource.hpp"
 
+#include <condition_variable>
 #include <cstddef>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -12,10 +14,8 @@ namespace frame_arena {
 
 enum class SlotState { Available, HostWriting, InFlight };
 
-// Host memory is split by direction. The upload arena is the source of H2D
-// copies: the CPU only writes it, so it can live in write-combined pinned
-// memory, which is uncached and very slow to read back. The download arena
-// receives D2H copies and anything the CPU reads, so it stays cacheable.
+// Write-combined pinned memory suits the upload arena, which the CPU only writes;
+// it is uncached, so reading it back is very slow.
 enum class UploadMemory { WriteCombined, Cacheable };
 
 struct SlotLayout {
@@ -69,6 +69,8 @@ private:
   std::size_t index_;
 };
 
+// mutex_ covers the ring order, slot states and stats, so a lease can be acquired on
+// one thread and submitted on another. What a lease exposes belongs to its holder.
 class FrameRing {
 public:
   FrameRing(std::size_t depth, SlotLayout layout, UploadMemory upload = UploadMemory::WriteCombined);
@@ -81,16 +83,20 @@ public:
 
   std::size_t depth() const noexcept { return slots_.size(); }
   const SlotLayout& layout() const noexcept { return layout_; }
-  std::size_t next_index() const noexcept { return next_; }
+  std::size_t next_index() const;
   const FrameSlot& slot(std::size_t index) const noexcept { return slots_[index]; }
-  const RingStats& stats() const noexcept { return stats_; }
+  RingStats stats() const;
 
 private:
   friend class FrameLease;
-  FrameLease lease(std::size_t index);
+  bool next_slot_ready();
+  void wait_for_next_slot(std::unique_lock<std::mutex>& lock);
+  FrameLease lease(std::unique_lock<std::mutex>& lock);
   void retire(FrameSlot& slot);
   void submit(std::size_t index);
 
+  mutable std::mutex mutex_;
+  std::condition_variable submitted_;
   SlotLayout layout_;
   PinnedBuffer upload_slab_;
   PinnedBuffer download_slab_;

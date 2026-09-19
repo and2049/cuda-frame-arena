@@ -1,13 +1,5 @@
-// The frame pipeline of frame_layout.hpp::enqueue_frame, written in the gpu
-// dialect. The host function is deliberately synchronous: every gpu op runs
-// in stream order and nothing carries a token. The gpu-async-region pass adds
-// the !gpu.async.token dependencies, which is the same lifetime rule the
-// FrameRing enforces with one stream and one completion event per slot.
-//
-//   tools/run_gpu_dialect.sh              # async-region, then gpu-to-llvm
-//
-// The kernel is the original one-pixel-per-thread grayscale_kernel: a shared
-// (workgroup) histogram filled with atomics and flushed to global memory.
+// enqueue_frame in the gpu dialect, with the one-pixel-per-thread kernel. The host
+// side is synchronous on purpose: gpu-async-region adds the tokens (the stream order).
 
 module attributes {gpu.container_module} {
 
@@ -74,9 +66,7 @@ module attributes {gpu.container_module} {
     }
   }
 
-  // One frame: H2D copy of rgb, histogram clear, kernel, D2H copies of gray
-  // and histogram. Host memrefs are the slot's upload and download arenas,
-  // device memrefs its device arena.
+  // Host memrefs are the slot's upload and download arenas, device memrefs its device arena.
   func.func @enqueue_frame(%host_rgb: memref<?xi8>, %host_gray: memref<?xi8>,
                            %host_histogram: memref<256xi32>,
                            %device_rgb: memref<?xi8>, %device_gray: memref<?xi8>,

@@ -65,9 +65,19 @@ Available ──acquire()──▶ HostWriting ──submit()──▶ InFlight 
 
 `try_acquire()` looks at the next slot in ring order and queries its completion event: `cudaSuccess` runs the slot's `on_retire` callback (if any), resets the arenas and returns a `FrameLease`; `cudaErrorNotReady` returns `std::nullopt`; anything else throws `CudaError`. The blocking policy lives in `acquire()`, which synchronizes on the event and counts the wait in `RingStats`.
 
-`FrameLease::submit()` records the completion event on the slot's stream after everything the caller enqueued, and dropping a lease without submitting submits it implicitly, so a slot can never be stranded in `HostWriting`. Acquiring a slot that is still `HostWriting` is a logic error and throws.
+`FrameLease::submit()` records the completion event on the slot's stream after everything the caller enqueued, and dropping a lease without submitting submits it implicitly, so a slot can never be stranded in `HostWriting`. A slot that is still `HostWriting` is not ready either: `try_acquire()` returns `std::nullopt` and `acquire()` waits for its `submit()`.
 
 The `on_retire` callback exists because the best moment to verify a frame is right before its slot is recycled: the event has fired, the D2H copy has landed in pinned memory, and the arenas have not been reset yet. The demo uses it to run the CPU reference check.
+
+## Threads
+
+A decoder thread and an inference thread can share one ring: the decoder acquires a lease, fills the upload arena and hands the lease over, and the inference thread enqueues its work and submits. One mutex in `FrameRing` guards what the two contend for: the ring index, the slot states and the stats. Everything reachable through a lease (its arenas, stream and `on_retire` callback) belongs to whoever holds the lease and is not synchronized, the same way the memory behind a `unique_ptr` is not.
+
+The lock is never held across a wait. `acquire()` blocks on the completion event with the lock released, because the `submit()` that records that event needs the lock, and because a `try_acquire()` on the other thread should keep returning `std::nullopt` rather than queue behind a GPU wait. A leased slot is a different wait: with two threads it means the other stage has not submitted yet, so `acquire()` sleeps on a condition variable that `submit()` notifies. After either wait the slot may have gone to another caller, so the next slot is checked again. The retire callback runs after the slot has been claimed and the lock dropped, so a slow verification does not stall the other thread. `drain()` is the exception and holds the lock until every in-flight slot has retired.
+
+Two things stay with the caller. Ring order is shared, so a thread that holds the next slot's lease and calls `acquire()` on the same ring waits for itself. And `slot(i)` returns the slot as is, for the tests and the benchmark; reading its `state` from another thread races with the ring.
+
+`test_leases_move_between_threads` is the deadlock check: with depth 2 the producer blocks in `acquire()` on an event that only a `submit()` from the consumer thread will record.
 
 ## Arena
 
@@ -107,11 +117,11 @@ The 32-bit path needs `rgb` and `gray` to be 4-byte aligned, which the arenas gu
 
 ## Limitations / TODO
 
-- one host thread, one CUDA device, one stream per slot
+- one CUDA device, one stream per slot
 - fixed number and size of slots, chosen at construction
 - no individual deallocation; arenas reset only when a slot is retired
 - trivially copyable byte buffers only; no constructors or destructors run in arena storage
 - a failed multi-region carve leaves its partial allocations in place until the next reset
 - no sharing an allocation between unrelated streams, and no attempt to replace the CUDA stream-ordered allocator
 
-TODO: thread safety (a mutex around `try_acquire`/`submit` would be the first step), `std::pmr::memory_resource` adapters, multi-GPU, free lists, CUDA Graphs, mapped or unified memory. The gpu dialect version is a lowering exercise, not a runnable replacement: it has no ring, no verification, and its kernel is the unvectorized one.
+TODO: `std::pmr::memory_resource` adapters, multi-GPU, free lists, CUDA Graphs, mapped or unified memory. The gpu dialect version is a lowering exercise, not a runnable replacement: it has no ring, no verification, and its kernel is the unvectorized one.

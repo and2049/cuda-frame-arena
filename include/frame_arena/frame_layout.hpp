@@ -42,16 +42,10 @@ constexpr std::size_t frame_download_bytes(FrameDims dims) noexcept {
          sizeof(FrameMetadata);
 }
 
-// The device arena holds both directions: the kernel reads rgb and writes gray
-// and histogram from the same slab.
 constexpr SlotLayout frame_slot_layout(FrameDims dims) noexcept {
   return {frame_upload_bytes(dims), frame_download_bytes(dims), frame_upload_bytes(dims) + frame_download_bytes(dims)};
 }
 
-// rgb comes from `input`, which the CPU fills and the copy engine reads; gray,
-// histogram and metadata come from `output`, which the CPU reads back. On the
-// host these are the upload and download arenas; on the device both are the
-// slot's single device arena.
 inline std::optional<FrameRegions> carve_frame(Arena& input, Arena& output, FrameDims dims) noexcept {
   FrameRegions r;
   if (!(r.rgb = static_cast<std::uint8_t*>(input.allocate(dims.pixels() * 3, kRgbAlignment)))) return std::nullopt;
@@ -95,9 +89,7 @@ inline void enqueue_frame(const FrameRegions& host, const FrameRegions& device, 
   CUDA_CHECK(cudaMemcpyAsync(host.histogram, device.histogram, kHistogramBytes, cudaMemcpyDeviceToHost, stream));
 }
 
-// Recomputes the expected output from the synthetic generator rather than
-// reading host.rgb back: the input region is written by the CPU and read by
-// the copy engine, and nothing in the pipeline should need to read it again.
+// Regenerates the input rather than reading host.rgb back, which may be write-combined memory.
 inline bool verify_grayscale(const FrameRegions& host, FrameDims dims, std::uint32_t frame_id) {
   std::vector<std::uint8_t> rgb(dims.pixels() * 3);
   fill_synthetic_rgb(rgb.data(), dims, frame_id);
